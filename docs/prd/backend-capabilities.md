@@ -25,6 +25,8 @@ git merge-base --is-ancestor cda3c2f HEAD && echo "subscription isolation OK"
 | `CMD1`（`health`、`state.subscribe`、`profile.reload`、`effect.preview`、`rules.simulate`、`rate.set`、`hid.claim/release`） | `feat/ui-backend` / `bbfba7e` | `main` 不含 `internal/vpad/ipc/cmd.go` |
 | `signals.subscribe` + STATE1/SIG1 订阅隔离 | `feat/ui-backend` / `cda3c2f` | 该提交前，STATE1 与 SIG1 会串流到同一客户端 |
 | 稳定 `rule_id`（`md5(rule.name)` 前 2 字节） | `feat/ui-backend` / `190426a` | 更早的提交用切片下标，`profile.reload` 后 id 会跳到别的规则上 |
+| 规则名唯一性校验（重复非空规则名加载失败） | `feat/ui-backend` / `a18d2aa` | `profile.Validate()` 拒绝同名非空规则，避免共享 `rule_id` 与 reload 计时槽 |
+| 严格 `profile.apply`（局部合并 + 逐键 applied/ignored） | `feat/ui-backend` / `82cf0af` | `signal.Shaper` 已补 json tag；非法 JSON 返回 `ok:false`；未知信号与越界值进 `ignored` |
 
 > 结论：GUI 的构建与连接检查必须固定到 `feat/ui-backend` 分支（或包含上述提交的 tag），不要以 `main` 作为兼容基线。
 
@@ -132,7 +134,9 @@ func StableRuleID(name string) uint16 {
 - 同名必定同 id（进程重启、`profile.reload`、规则按 priority 重排都不影响）。
 - 帧内**顺序仍按 priority 升序**；`RuleID` 与数组下标无关，客户端必须用 `rule_id` 作为 key（选中态、历史曲线、录像索引），**不要用数组下标**。
 - 16-bit 空间对 <64 条规则足够：生日近似碰撞概率约 `64²/(2×65536) ≈ 3%`，且名字集合固定，不会每次运行随机变化；本仓库内置 Profile 实测为 110 条规则 / 91 个不同规则名、**0 碰撞**（有回归测试）。规则数量继续增长后，客户端仍应按 id 去重而不是假设唯一性。
-- 同一 Profile 内规则重名会共享同一个 id（例如历史 `far-far-west.yaml` 曾有两个 `shot-left`，本补丁已重命名为 `shot-left-bass`）。规则名应保持唯一。
+- 同一 Profile 内非空规则名必须唯一：`profile.Validate()` 在 `LoadFile` / `Builtin` / `Dir` / `profile.reload` 时强制校验。重复时返回
+  `profile X: duplicate rule name "foo" (rules[3] and rules[7])` 并拒绝加载，因此不会再出现两条命名规则共享同一个 `rule_id` 的情况。
+- 匿名规则（`name` 为空）仍允许多条存在，其 label 回退为 `rules[i]`。历史 `far-far-west.yaml` 的重复名已在此前修复。
 
 ### 2.5 输出摘要段定义 (Summary, 40 Bytes)
 反映手柄当前真实的物理输出报告状态：
@@ -240,21 +244,40 @@ func StableRuleID(name string) uint16 {
 - **生效范围**：整形曲线（`set.SetShapers`）与规则（`engine.Reload`）；规则计时状态按**规则名**继承；`rule_id` 由名字派生，因此跨 reload 稳定
 
 #### 5. `profile.apply`
-动态局部打补丁，当前**只支持 `shape`（信号整形曲线）**，用于 GUI 曲线编辑器拖拽时的免落盘实时试听。
+动态局部打补丁，当前只支持 `shape`（信号整形曲线），用于 GUI 曲线编辑器拖拽时的免落盘实时试听。
+
 - **请求参数**：
   ```json
   {
     "shape": {
-      "throttle": { "deadzone": 0.05, "gamma": 1.2, "SlewUp": 10.0, "SlewDown": 20.0 }
+      "throttle": { "deadzone": 0.05, "gamma": 1.2, "slew_up": 10.0, "slew_down": 20.0 }
     }
   }
   ```
-- **返回结果**：`{"applied": true}`
-- **如实说明（当前实现的边界）**：
-  - **仅**应用 `shape` 到运行中的 `signal.Set`；**不会**写回磁盘、**不会**修改 Profile 的 `rules`、**不会**触发 `engine.Reload`。
-  - 单条规则的 `params`/`when`/`priority` 热补丁**尚未实现**。需要实时试扳机力学时用 `effect.preview`（带 TTL，超时自动交还规则引擎）；需要改规则时改 YAML 后调用 `profile.reload`。
-  - JSON key 走 Go `encoding/json` 的字段匹配，而 `signal.Shaper` **没有 json tag**：可用 `Deadzone` / `Gamma` / `SlewUp` / `SlewDown`（大小写不敏感），但 `slew_up` / `slew_down` 这种下划线写法**会被静默忽略**。
-  - 解析失败或 `shape` 为空时也返回 `applied:true`，客户端应自行校验返回并重读状态；该命令不回传成功应用的条目列表。
+- **返回结果**：
+  ```json
+  {
+    "applied": ["throttle", "l2"],
+    "ignored": ["nope", "r2"],
+    "reasons": {
+      "nope": "unknown signal",
+      "r2": "gamma must be > 0"
+    }
+  }
+  ```
+- **合并语义**：
+  - 只覆盖请求 `shape` 中出现的信号，其余信号的 shaping 完全保留。
+  - 对出现的信号做字段级合并：只覆盖请求中显式出现的字段（`deadzone` / `gamma` / `slew_up` / `slew_down`），未出现字段保留当前运行时值。
+  - 补丁仅作用于运行时 `signal.Set`，不写磁盘、不修改 `rules`、不触发 `engine.Reload`。
+  - `profile.reload` 会重新读取 YAML 并整体替换运行时 shaper，因此补丁在 reload 后丢弃。
+- **JSON / YAML 字段名**：`signal.Shaper` 已补 json tag，统一使用 `deadzone` / `gamma` / `slew_up` / `slew_down`；`slew_up` / `slew_down` 不再被静默忽略。
+- **校验与回报**：
+  - 非法 JSON、空 body、缺少 `shape` 或 `shape` 为空 -> `ok:false` + error，不应用任何补丁。
+  - 未知信号（不在 `signal.Standard` 且不在 profile 的 `signals` 扩展中）-> 进入 `ignored`，原因为 `unknown signal`。
+  - 数值越界 -> 对应信号进入 `ignored` 并附原因：`deadzone` 必须在 `[0,1]`，`gamma` 必须 `> 0`，`slew_up` / `slew_down` 必须 `>= 0`；单个信号内多个字段越界时只回报第一个原因（固定顺序 `deadzone → gamma → slew_up → slew_down`）。
+  - 一个请求中合法与非法信号混合时，合法信号照常 `applied`，非法信号逐条 `ignored`。
+  - `applied` / `ignored` 均排序，`reasons` 只包含被忽略的信号。
+- 单条规则的 `params` / `when` / `priority` 热补丁尚未实现；需要实时试扳机力学时用 `effect.preview`，需要改规则时改 YAML 后调用 `profile.reload`。
 
 #### 6. `effect.preview`
 临时下发硬件扳机力学测试（带 TTL 自动释放，超时后无缝交还规则引擎）。

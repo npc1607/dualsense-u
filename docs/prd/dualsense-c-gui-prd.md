@@ -248,7 +248,7 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 | `state.subscribe{rate}` | 协商 STATE1 推送频率（30 / 60Hz） | ✅ 已实现 |
 | `signals.subscribe` | 切到 SIG1 125Hz 原始流（与 `state.subscribe` 互斥；无参数、不协商频率；连接建立 20ms 内未发 CMD1 的老客户端自动走此路） | ✅ 已实现 |
 | `profile.reload` | 从磁盘重读当前 profile 并热应用（`SetShapers` + `Engine.Reload`，失败回滚） | ✅ 已实现 |
-| `profile.apply{shape}` | **只支持 `shape` 补丁**（`signal.Shaper` 仅 yaml tag，`slew_up/slew_down` 会被静默忽略；非法 JSON 仍返回 `applied:true`） | ✅（单规则 params / when / priority 补丁**未实现**） |
+| `profile.apply{shape}` | **只支持 `shape` 补丁**（局部合并；未知信号与越界值进 `ignored`；非法 JSON 返回 `ok:false`） | ✅ 已实现：局部合并 + 逐键 `applied`/`ignored`，非法 JSON 报错 |
 | `effect.preview{target, mode, params, ttl_ms}` | 临时覆盖 L2/R2 效果，ttl 到期交还规则引擎 | ✅ 已实现 |
 | `rate.set{hz}` | 切换 sink 出帧率（非法值静默忽略） | ✅ 已实现 |
 | `hid.claim` / `hid.release` | 显式申请 / 释放硬件写权 | ⚠️ 占位实现（仅返回成功） |
@@ -394,7 +394,7 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 | `aim` 曲线在 ds5d 与 ds5vpad 双路实现漂移 | 高 | 中 | 单一 `internal/aim` 实现 + profile 版本戳 + STATE1 `aim.mismatch` 告警 |
 | MyGo 处于 0.x，API 可能破坏性变更 | 高 | 中 | 锁 tag + 框架依赖收敛在 `internal/gui/shell` 单层 + CI 固定版本矩阵；曲线/波形保留纯数据层，换壳不重写 |
 | Linux WebKitGTK 版本碎片（web 路径） | 中 | 高 | 启动时检测版本并降级到 native 窗或浏览器直连；AppImage 内置依赖；Ubuntu LTS / Debian / Arch 列入测试矩阵 |
-| 第三方 profile 规则重名导致 `rule_id` 相同 | 中 | 中 | 内置 profile 已修重名；后续在 `profile.Validate` 加「规则名唯一」校验（当前仅文档约束） |
+| 第三方 profile 规则重名导致 `rule_id` 相同 | 中 | 低 | **已修复**：`profile.Validate()` 强制非空规则名唯一，重复时加载失败并给出规则下标；内置与 `profiles/` 示例已全部通过 |
 | macOS 无 HID 导致开发体验割裂 | 低 | 高 | 全面支持录像回放与 `rules.simulate`，无硬件也能完成大部分调参 |
 
 ### 8.2 开放问题（需决策）
