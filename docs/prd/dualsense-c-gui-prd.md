@@ -19,7 +19,7 @@ status: draft
 > [!IMPORTANT]
 > **当前代码基线（已逐条核对代码）**
 > - 四层架构已就绪：`source` → `signal.Set`（每信号持有 raw / shaped / age）→ `rules.Engine.Step` → `sink.Run` + `hid.Frame`。
-> - 信号词表 `signal.Standard` 共 **76** 个名字，`id 0..75`（末位 `hazard`=75），wire 上是 `uint8` id，注释明确 **APPEND ONLY**；`ds5bridge.exe` 已按 id 部署，中间插入会静默错位。
+> - 信号词表 `signal.Standard` 共 **80** 个名字，`id 0..79`（末位 `r3`=79），wire 上是 `uint8` id，注释明确 **APPEND ONLY**；`ds5bridge.exe` 已按 id 部署，中间插入会静默错位。
 > - 已有 IPC：`9997` 上 SIG1（`ver=1`，`magic u32 / ver u16 / count u16 / seq u32` 共 12B 头 + N×5B，条目按 id 升序，`ver!=1` 直接拒绝）与 SPK1（JSON 载荷）；`9998` 上 FFB1（12B）；`ds5radio` 独立占 UDP `9999`。
 > - `signal.Set.Snapshot()` 只返回 shaped 值且 **直接丢弃 stale**；而 SIG1 广播的是 source 原始帧 `f.Values`（`cmd/ds5d/main.go:178`），既无 shaped、无 freshness，也无规则状态。
 > - `rules.Engine` 每 tick 的决策过程（三态、params 求值、hold / cooldown、priority 抢占、release 衰减）全部是 `rule` 结构体的未导出字段，**无任何对外遥测**。
@@ -35,7 +35,7 @@ status: draft
 | `raw` | source 直接产出的原始信号值，未经任何整形 |
 | `shaped` | 经 `signal.Shaper`（deadzone / gamma / slew_up / slew_down）处理后的值，**规则实际看到的就是它** |
 | `fresh` / `stale` | 信号是否在 `signal_ttl`（默认 400ms）内更新过；stale 值被 `Snapshot` 丢弃，`has()` 返回 0 |
-| `signal.Standard` | 76 个标准信号名的有序词表（`id 0..75`），**APPEND ONLY**，是 ds5d / ds5bridge 之间的 wire 契约 |
+| `signal.Standard` | 80 个标准信号名的有序词表（`id 0..79`），**APPEND ONLY**，是 ds5d / ds5bridge 之间的 wire 契约 |
 | `STATE1` | 本 PRD 新增状态流（magic `STT1`）：shaped + raw + age + freshness + 规则三态 + 输出帧摘要 |
 | `CMD1` | 本 PRD 新增控制面（magic `CMD1`）：热重载、效果预览、rate 切换、健康查询、离线试算 |
 | `dry-run` | 不打开控制器，仅运行 source → Set → Engine 并输出帧的调试模式 |
@@ -150,7 +150,7 @@ CLI 输出是「某一瞬间的一行数字」，而调参需要的是**同一�
 |---|---|---|---|
 | 1.1 | 设备面板 | 连接状态、hidraw 路径、USB / BT、VID:PID、实际输出速率、会话 uptime、重连次数、写失败计数；一键 claim / release、dry-run 切换 | P0 |
 | 1.2 | 输入可视化 | 双摇杆（物理原始位置 + shaped 位置残影 + 死区圆）、L2 / R2 双色行程条 + 阈值线（`l2_full` / `r2_full` 固定 0.85，及自定义 `crossed` 阈值）、全部按键与 D-pad、6 轴（gyro / accel 时域条 + 3D 姿态小窗）、触控板坐标点、电量与充电态 | P0 |
-| 1.3 | 信号总线监视器 | `signal.Standard` 全量 76 槽 + profile `signals` 扩展：名称与 id、raw / shaped 双值、sparkline（最近 10s）、fresh / stale 徽标、TTL 倒计时、来源归属、`has()` 结果；未提供者显示 `absent` 而非 0 | P0 |
+| 1.3 | 信号总线监视器 | `signal.Standard` 全量 80 槽：名称与 id、raw / shaped 双值、sparkline（最近 10s）、fresh / stale 徽标、TTL 倒计时、来源归属、`has()` 结果；未提供者显示 `absent` 而非 0 | P0 |
 | 1.4 | 日志与事件流 | 合并 ds5d 日志 + SPK1 语音事件 + 规则表达式错误，支持级别过滤与关键字搜索 | P0 |
 | 1.5 | 会话录像 | 把 STATE1 流写入本地文件，支持暂停与拖动回放（服务 P4 排障，同时作为 M2 dry-run 与 macOS 无硬件环境的数据源） | P1 |
 
@@ -225,13 +225,13 @@ CLI 输出是「某一瞬间的一行数字」，而调参需要的是**同一�
 ```text
 magic      "STT1" = 0x31545453   （与 FFB1 0x31424646 / SIG1 0x31474953 / SPK1 0x31505343 均不冲突）
 端口       9997（与 SIG1 / CMD1 复用，按 magic 分流）
-header     magic u32 | version u16 | flags u16(bit0=snapshot) | seq u32 | tick_ms u32 | signal_count u16 | rule_count u16
-信号段     每项 11B：id u8 | shaped f32 | raw f32 | age_ms u16     （76 项 = 836B）
+header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms u32 | signal_count u16 | rule_count u16
+信号段     每项 11B：id u8 | shaped f32 | raw f32 | age_ms u16     （80 项 = 880B）
 规则段     每项 13B：rule_id u16 | state u8 | priority i16 | last_fire_ms u32 | until_ms u32
           state: 0=FALSE 1=TRUE 2=HOLD 3=STALE 4=COOLDOWN 5=ERROR
 输出摘要   ~40B：L2/R2 mode + p[0..3]、rumble L/R、lightbar RGB、player_leds、mute、
           haptic L/R、rate_hz、tick jitter、hid 错误数、subscribers
-单帧预算   header 18B + 836B + 64×13B(832B) + 40B ≈ 1.73KB（≤ 2KB 硬指标）
+单帧预算   header 20B + 880B + 64×13B(832B) + 40B = 1772B（≈1.73KB，≤ 2KB 硬指标）
 频率       30–60Hz（SIG1 保持 125Hz 原始流不变）
 ```
 
@@ -269,7 +269,7 @@ header     magic u32 | version u16 | flags u16(bit0=snapshot) | seq u32 | tick_m
 
 ### 5.4 契约与兼容约束
 
-- `signal.Standard` **append-only**：`id 0..75` 已占用，新增只能追加在末尾；兼容性看板（5.6）是这条契约的可视化载体。
+- `signal.Standard` **append-only**：`id 0..79` 已占用，新增只能追加在末尾；兼容性看板（5.6）是这条契约的可视化载体。
 - SIG1 `ver=1` / FFB1 12B / SPK1 帧格式全部不变；新流以新 magic 并存，旧 `ds5bridge.exe` 不受影响。
 - 开启 `KnownFields` 属**行为变更**：存量未知键会从「静默失效」变为「启动失败」，必须在 CHANGELOG 明示，并给出迁移扫描脚本。
 - 端口不可变：9997（SIG1 / STT1 / CMD1 复用）、9998（FFB1）、9999（radio UDP）。
@@ -301,7 +301,7 @@ header     magic u32 | version u16 | flags u16(bit0=snapshot) | seq u32 | tick_m
 | 类型 | 要求 |
 |---|---|
 | 延迟 | 信号进入后端 → GUI 可见 ≤ 50ms（本地回环）；曲线拖拽 → 硬件生效 ≤ 100ms |
-| 吞吐 | STATE1 在 60Hz + 76 信号 + 64 规则下单帧 ≤ 2KB（设计值 ≈1.73KB），序列化 ≤ 1ms，CPU ≤ 3%（相对 ds5d 单核） |
+| 吞吐 | STATE1 在 60Hz + 80 信号 + 64 规则下单帧 ≤ 2KB（设计值 ≈1.73KB），序列化 ≤ 1ms，CPU ≤ 3%（相对 ds5d 单核） |
 | 主循环隔离 | 遥测 / 序列化 / 网络写**不得**进入 125Hz tick 关键路径；沿用「队列满即丢」并提供丢帧计数 |
 | GUI 性能 | 60Hz 数据下 UI ≥ 30fps（目标 60fps）；sparkline 与波形使用固定大小环形缓冲，禁止每帧大对象分配 |
 | 启动 | 冷启动到可用 ≤ 2s；无设备时进入只读 / dry-run 模式并明确提示，不阻塞 |
@@ -325,7 +325,7 @@ header     magic u32 | version u16 | flags u16(bit0=snapshot) | seq u32 | tick_m
 
 - [ ] 接入真实手柄后，双摇杆 / 扳机 / 按键 / 6 轴 / 触控 / 电量全部随物理操作实时变化，数值与 `ds5ctl watch` 一致（误差 ≤ 1 LSB）。
 - [ ] 断开数据源（如停掉 `ds5bridge`），对应信号在 `signal_ttl`（默认 400ms）后 ≤ 100ms 内变红并显示 TTL 倒计时；`has()` 显示 0，而「值为 0 但 fresh」显示为绿色 0。
-- [ ] 76 个标准信号 + profile 扩展信号全部出现在列表中，未提供者显示 `absent` 而非 0。
+- [ ] 80 个标准信号全部出现在列表中，未提供者显示 `absent` 而非 0；profile `signals` 扩展名不在 STATE1 内，需单独标注。
 - [ ] GUI 全程不打开 hidraw：`lsof` / `fuser` 验证唯一 owner 为 `ds5d`。
 
 ### M2
@@ -351,7 +351,7 @@ header     magic u32 | version u16 | flags u16(bit0=snapshot) | seq u32 | tick_m
 ### M5
 
 - [ ] 校准器能在 5 分钟内为一款未知游戏产出可用的 `fields` YAML，`ds5d` 加载后 `throttle` / `brake` / `speed` 与游戏内表现一致。
-- [ ] 兼容性看板导出的 id↔name 表与 `signal.Standard` 完全一致（76 条，含顺序）。
+- [ ] 兼容性看板导出的 id↔name 表与 `signal.Standard` 完全一致（80 条，含顺序）。
 - [ ] 音频 AI 面板在未启用 `-tags onnx` 的构建上给出明确原因，不显示空图。
 
 ### M6
@@ -531,10 +531,10 @@ header     magic u32 | version u16 | flags u16(bit0=snapshot) | seq u32 | tick_m
 ![图 11-5](assets/dualsense-c-gui/dualsense-c-gui-05-signals.png)
 <sub>图 11-5 S3 信号总线（源文件：[源文件 `dualsense-c-gui-05-signals.excalidraw`](assets/dualsense-c-gui/dualsense-c-gui-05-signals.excalidraw) · [SVG](assets/dualsense-c-gui/dualsense-c-gui-05-signals.svg)）</sub>
 
-- 76 槽全量 + profile `signals` 扩展；按 `id` 升序（wire 契约顺序）。`id ↔ name` 表由 `internal/signal/names.go` 生成，UI 不硬编码 76 个名字。
+- 80 槽全量；按 `id` 升序（wire 契约顺序）。`id ↔ name` 表由 `internal/signal/names.go` 生成，UI 不硬编码 80 个名字。profile `signals` 扩展名不出现在 STATE1 中。
 - 列：`id | name | raw | shaped | Δ | sparkline 10s | StateChip | TTL | provider(inferred ○) | has()`。
 - 过滤 `fresh / stale / absent / all` + 关键字搜索；表体虚拟化，仅渲染视口行（行高固定 34px）。
-- `TTL` 条：来源是 profile 的 `signal_ttl`（默认 400ms，**profile 可覆盖**）与 CMD1 元数据；`signal_ttl` 不在 STATE1 内，STATE1 只给 `age_ms` 这一事实值。
+- `TTL` 条：来源是 profile 的 `signal_ttl`（默认 400ms，**profile 可覆盖**，属客户端参数）；`signal_ttl` 不在 STATE1 内，CMD1 也不返回它，STATE1 只给 `age_ms` 这一事实值。
 - 常驻 `APPEND-ONLY 🔒` 徽标；5.6 兼容性看板复用同一 id 表，不另建一份。
 - 数据源：`STT1`；`provider` 为**推断**（STATE1 无 provider 字段）。
 
@@ -627,7 +627,7 @@ header     magic u32 | version u16 | flags u16(bit0=snapshot) | seq u32 | tick_m
 | `Timeline` | 跨屏时间轴 | `seq`, `paused`, `playheadMs`, `lanes` | 5s 定长缓冲；hover 冻结视图不动数据 | 刻度 `-5s…0s` + `paused` / `live` 文字 |
 | `DiffView` | 热重载 / A-B 差异 | `old`, `new`, `affectedRules` | 差分行数上限 + 折叠；不做逐字符动画 | 增/删/改的文字标签（`+` / `−` / `~`） |
 | `ParamRow` | `params` / `p0..p9` 行 | `key`, `expr`, `value`, `unit`, `clamped` | 固定顺序表；不求值多次 | 求值结果 + 单位 + `clamped` 文字 |
-| `CompatMatrix` | id ↔ name ↔ provider ↔ 消费规则 | `signalTable`, `profiles` | 复用 76 槽词表；行虚拟化 | `APPEND-ONLY` 徽标 + 覆盖度分数 |
+| `CompatMatrix` | id ↔ name ↔ provider ↔ 消费规则 | `signalTable`, `profiles` | 复用 80 槽词表；行虚拟化 | `APPEND-ONLY` 徽标 + 覆盖度分数 |
 
 ### 11.6 交互规范
 
@@ -750,7 +750,7 @@ header     magic u32 | version u16 | flags u16(bit0=snapshot) | seq u32 | tick_m
 | SIG1 广播 raw 而非 shaped | `cmd/ds5d/main.go:178` `BroadcastSignals(f.Values)` | `grep -n 'BroadcastSignals(f.Values)' cmd/ds5d/main.go` |
 | SIG1 wire 字段序与无 freshness | `internal/vpad/ipc/ipc.go` `MagicSig` / `EncodeSignalFrame` | `grep -n 'MagicSig\|EncodeSignalFrame' internal/vpad/ipc/ipc.go` |
 | shaped 值不外露、stale 被丢弃 | `internal/signal/set.go` `entry` / `Snapshot` | `grep -n 'func (s \*Set) Snapshot\|type entry struct' internal/signal/set.go` |
-| 词表 76 项、`id 0..75`、append-only | `internal/signal/names.go` `Standard` | `grep -c '"[a-z0-9_]*"' internal/signal/names.go`（配合人工核对分组） |
+| 词表 80 项、`id 0..79`、append-only | `internal/signal/names.go` `Standard` | `sed -n '/^var Standard = /,/^}/p' internal/signal/names.go \| grep -o '"[a-z0-9_]*"' \| wc -l`（应为 80） |
 | 规则状态不可观测 | `internal/rules/engine.go` `Step` / `active` / `decay` / `reportErr` | `grep -n 'func (e \*Engine) Step\|func (e \*Engine) active\|func (e \*Engine) decay' internal/rules/engine.go` |
 | priority 升序、同 target 后写覆盖 | `internal/rules/engine.go` 规则排序 + `apply` 的 `written` map | `grep -n 'SortStableFunc(e.rules\|written\[' internal/rules/engine.go` |
 | mode 与参数名映射 | `internal/hid/effect.go` `Mode*` 常量、`modesByName`、`paramNames` | `sed -n '20,80p' internal/hid/effect.go` |
