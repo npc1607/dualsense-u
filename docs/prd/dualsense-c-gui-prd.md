@@ -240,21 +240,25 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 
 ### 5.2 CMD1 控制面（M2 / M4 / M6 阻塞项）
 
-现有 `ipc.Server` 只写不读（`acceptLoop` 只处理写队列），需增加读循环 + 帧解析：`magic "CMD1" = 0x31444D43 | len u32 | JSON payload`。
+`magic "CMD1" = 0x31444D43 | len u32 | JSON payload`，请求 `{id, method, params}`、响应 `{id, ok, result, error}`。**已在 `feat/ui-backend` 实现**（读循环 + 帧解析，见 `backend-capabilities.md` §3），下表标注各方法当前完成度。
 
-| 指令 | 语义 |
-|---|---|
-| `state.subscribe{rate}` | 协商 STATE1 推送频率（30 / 60Hz） |
-| `profile.reload` | 从磁盘重读当前 profile 并热应用（失败回滚） |
-| `profile.apply{patch}` | 局部补丁（单规则 / 单 shape 项），供曲线编辑器写回时做即时预览 |
-| `effect.preview{mode, params, ttl_ms}` | 临时覆盖 L2/R2 效果，ttl 到期自动交还规则引擎 |
-| `rate.set{hz}` | 切换 sink 出帧率 |
-| `hid.claim` / `hid.release` | 显式申请 / 释放硬件写权，供 bench 类操作使用 |
-| `rules.simulate{signals}` | 离线试算：喂一组信号，返回规则三态与输出帧，**不写硬件** |
-| `health` | uptime、重连次数、写失败数、p99 tick jitter、STATE1 丢帧数、subscribers |
+| 指令 | 语义 | 实现状态 |
+|---|---|---|
+| `health` | uptime、subscribers、rate_hz、profile、source、jitter_us | ✅ 已实现 |
+| `state.subscribe{rate}` | 协商 STATE1 推送频率（30 / 60Hz） | ✅ 已实现 |
+| `signals.subscribe` | 切到 SIG1 125Hz 原始流（与 `state.subscribe` 互斥；无参数、不协商频率；连接建立 20ms 内未发 CMD1 的老客户端自动走此路） | ✅ 已实现 |
+| `profile.reload` | 从磁盘重读当前 profile 并热应用（`SetShapers` + `Engine.Reload`，失败回滚） | ✅ 已实现 |
+| `profile.apply{shape}` | **只支持 `shape` 补丁**（`signal.Shaper` 仅 yaml tag，`slew_up/slew_down` 会被静默忽略；非法 JSON 仍返回 `applied:true`） | ✅（单规则 params / when / priority 补丁**未实现**） |
+| `effect.preview{target, mode, params, ttl_ms}` | 临时覆盖 L2/R2 效果，ttl 到期交还规则引擎 | ✅ 已实现 |
+| `rate.set{hz}` | 切换 sink 出帧率（非法值静默忽略） | ✅ 已实现 |
+| `hid.claim` / `hid.release` | 显式申请 / 释放硬件写权 | ⚠️ 占位实现（仅返回成功） |
+| `rules.simulate{signals}` | 离线试算：喂一组信号，返回规则三态与输出帧，**不写硬件** | ✅ 已实现（克隆引擎） |
+
+> 响应示例、字段级语义、边界行为以 `backend-capabilities.md` §3 为准；本节只定义 GUI 的调用契约。
 
 - **单进程 HID 所有权**：`ds5ctl bench/watch/test` 与 GUI 一律改为经 CMD1 请求 `ds5d` 代为写帧 / 读输入；`ds5d` 是唯一 hidraw owner。这是消除抢设备的唯一正解。
 - **`rules.simulate` 不得污染真实状态**：必须基于引擎状态克隆执行，禁止推进真实的 `until` / `lastFired`，否则预览会改变真机行为。
+- **`rule_id` 跨 reload 稳定**：`rule_id = uint16(md5(rule.name)[0:2], LE)`；GUI 的选中态 / 历史曲线 / 录像一律以 `rule_id` 为 key，**不得用数组下标**。帧内顺序仍按 priority 升序。
 
 ### 5.3 其他后端缺口
 
@@ -304,22 +308,35 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 | 吞吐 | STATE1 在 60Hz + 80 信号 + 64 规则下单帧 ≤ 2KB（设计值 ≈1.73KB），序列化 ≤ 1ms，CPU ≤ 3%（相对 ds5d 单核） |
 | 主循环隔离 | 遥测 / 序列化 / 网络写**不得**进入 125Hz tick 关键路径；沿用「队列满即丢」并提供丢帧计数 |
 | GUI 性能 | 60Hz 数据下 UI ≥ 30fps（目标 60fps）；sparkline 与波形使用固定大小环形缓冲，禁止每帧大对象分配 |
+| 帧预算测量 | 以 `MYGO_FRAME_STATS=1` 输出 build / layout / paint / present 分项耗时作为验收工具；native 路径仅在 STATE1 `seq` 变化时 `Invalidate`，空闲不绘帧 |
 | 启动 | 冷启动到可用 ≤ 2s；无设备时进入只读 / dry-run 模式并明确提示，不阻塞 |
 | 资源 | GUI 常驻内存 ≤ 300MB；空闲 CPU ≤ 5% |
-| 跨平台 | Linux 为一等公民（hidraw + PipeWire 音圈）；Windows 与 `ds5d.exe` 对等，至少支持只读面板 + 编辑；macOS 仅编辑 / dry-run / 回放 / `rules.simulate`，HID 相关控件标灰 |
+| 跨平台 | Linux 为一等公民（hidraw + PipeWire 音圈）；Windows 与 `ds5d.exe` 对等，至少支持只读面板 + 编辑；macOS 仅编辑 / dry-run / 回放 / `rules.simulate`，HID 相关控件标灰。**运行时依赖**：Linux 需 GTK3 + libGL/Mesa（native）或 GTK3 + WebKitGTK 4.1（web）；Windows web 路径需 WebView2 Runtime；macOS 无额外依赖 |
 | 构建 | 维持 `CGO_ENABLED=0` 交叉编译矩阵（`GOOS=linux/windows/darwin go build ./...`），`-tags onnx` 除外；前端资源经 `embed.FS` 打包，运行时不依赖 Node |
 | 安全 | 仅监听 `127.0.0.1`；不写系统目录以外路径；profile 写入限定 profiles 目录 |
 | 可维护性 | 复用既有 magic / version 约定；新增代码须通过 `gofmt` / `go vet` / `go test`（与 `.github/workflows/release.yml` 一致） |
 | 可访问性 | 单位与量纲显式标注（0–1 / 0–255 / ms / Hz / %）；stale 状态不能只靠颜色，需附文字徽标 |
 
 > [!NOTE]
-> **技术选型（待评审）**
-> - **方案 A：内嵌 SPA + 单二进制**（`cmd/ds5gui` 提供 HTTP/SSE，前端 `embed.FS` 内嵌）。零 CGO，符合现有交叉编译习惯，Windows 零运行时；桌面感较弱。
-> - **方案 B：Wails**。桌面体验好，但 Linux 引入 webkit2gtk 与 CGO，与 `CGO_ENABLED=0` 矩阵冲突。
-> - **方案 C：Tauri**。体验最好，但仓库引入 Rust 壳与第二套工具链，CI 成本上升。
-> - 决策留待 M0（见 §八 开放问题 #2），本 PRD 不预设结论；三方案对 §五 的后端契约无影响。
+> **技术选型：已定 MyGo（`egoist/mygo`）**
+> - **决策**：GUI 壳采用 MyGo（纯 Go、无 cgo、~7MB 单二进制、三端交叉编译；同一进程可混用 native 窗与 web 窗）。
+> - **理由**：① 满足本节 `CGO_ENABLED=0` 矩阵，而 Wails v3 / Fyne / Gio 均因 webkit2gtk 或 GL 引入 cgo（Wails v3 更要求 GTK4 + WebKitGTK 6.0，官方只承诺 Ubuntu 24.04）；② `ui.Path` / `StrokePath` / `ui/shader` / `ui/chart` 足以自绘曲线、波形、频谱；③ `ui/editor` 自带 diff 视图，可直接承载 §4.4 的表单⇄YAML 对比。
+> - **两路径分工（默认值，M0 spike 可推翻）**：主界面走 **web 路径**（系统 webview + 前端资源），1:1 还原 §十一 设计稿；**native 路径**仅用于 P2 的高频诊断子窗（波形 / 频谱），避开 webview 的 JS 往返开销。
+> - **版本策略**：MyGo 处于 0.x（2026-09 建仓），锁定具体 tag；框架依赖收敛在 `internal/gui/shell` 单层，升级只改一处。曲线/波形保留纯数据层，换壳不重写。
+> - **被排除项**：Wails v3（Linux 栈过新 + cgo）、Fyne / Gio（自绘受限 / 交叉编译需 cgo）、Qt / Sciter / Slint-Go（cgo 或绑定 WIP）、Energy（CEF 体积）、Lorca（依赖本机 Chrome）。
+> - **运维含义**：Linux 需 GTK3 + libGL/Mesa（web 路径另需 WebKitGTK 4.1）；Windows web 路径需 WebView2 Runtime（Win11 内置，Win10 需引导安装）；macOS 用系统 WKWebView，无额外依赖。安装包与文档必须声明最低版本，并把「无 webview 环境」降级为 native 窗或浏览器直连。
+> - 细节取舍说明：`CGO_ENABLED=0` 交叉编译可行，但 **native 路径 ≠ 零系统库**——目标机仍需 GTK3/libGL；Bun 仅构建期使用，运行时不依赖 Node。
 
 ## 七、验收标准
+
+### M0（技术选型 spike，硬门槛）
+
+- [ ] 三端（Linux / Windows / macOS）各起一个窗口，跑 60Hz 折线 + `MYGO_FRAME_STATS=1`，p99 paint+build 满足 ≥30fps。
+- [ ] 80 行信号表在两条路径各验证一次；native 路径的等宽 `tabular` 数字列对齐与 web 路径逐像素对照。
+- [ ] 曲线 handle 拖拽 → CMD1 `effect.preview` 端到端 ≤ 100ms（乐观重绘 + 30Hz 节流）。
+- [ ] Linux 目标发行版（Ubuntu LTS / Debian / Arch）上 GTK3 与 WebKitGTK 版本可用性、Canvas 性能实测，据此定下最低版本与降级策略。
+- [ ] `ui/editor` 的 diff 视图能否直接承载 §4.4 的表单⇄YAML diff；不能则记录需自写的部分。
+- [ ] 结论回写 PRD：主界面路线（web / native）、native 子窗范围、最低版本清单。
 
 ### M1
 
@@ -375,7 +392,9 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 | 校准器 `fmt` 猜错导致「看起来能用其实错位」 | 中 | 中 | 强制物理量单调性辅助校验，导出时附置信度提示 |
 | mode 参数语义与真机不一致 | 中 | 中 | 编辑器显示命名语义但保留 `p0..p9` 原始视图；以 `bench` 回放作为真值校验 |
 | `aim` 曲线在 ds5d 与 ds5vpad 双路实现漂移 | 高 | 中 | 单一 `internal/aim` 实现 + profile 版本戳 + STATE1 `aim.mismatch` 告警 |
-| 跨平台前端分发成本 | 中 | 中 | 优先「浏览器 + 单二进制 HTTP 服务」，避开原生 webview 依赖 |
+| MyGo 处于 0.x，API 可能破坏性变更 | 高 | 中 | 锁 tag + 框架依赖收敛在 `internal/gui/shell` 单层 + CI 固定版本矩阵；曲线/波形保留纯数据层，换壳不重写 |
+| Linux WebKitGTK 版本碎片（web 路径） | 中 | 高 | 启动时检测版本并降级到 native 窗或浏览器直连；AppImage 内置依赖；Ubuntu LTS / Debian / Arch 列入测试矩阵 |
+| 第三方 profile 规则重名导致 `rule_id` 相同 | 中 | 中 | 内置 profile 已修重名；后续在 `profile.Validate` 加「规则名唯一」校验（当前仅文档约束） |
 | macOS 无 HID 导致开发体验割裂 | 低 | 高 | 全面支持录像回放与 `rules.simulate`，无硬件也能完成大部分调参 |
 
 ### 8.2 开放问题（需决策）
@@ -383,27 +402,29 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 | # | 问题 | 建议默认值 | 决策人 |
 |---|---|---|---|
 | 1 | GUI 仓库形态：同仓 `cmd/ds5gui` vs 独立仓库 | 同仓（复用 internal 包与 CI） | 作者 |
-| 2 | 技术选型：内嵌 SPA vs Wails vs Tauri | 内嵌 SPA（零 CGO） | 作者 / TL |
+| 2 | ~~技术选型~~（**已定**） | **MyGo**（`egoist/mygo`：web 路径主界面 + native 诊断子窗），锁 tag | 作者（已决） |
 | 3 | STATE1 默认频率 30Hz 还是 60Hz，是否允许订阅者协商 | 默认 30Hz，可协商至 60Hz | 评审 |
 | 4 | CMD1 是否复用 9997 双向连接，还是独立端口 | 复用 9997，按 magic 分流 | 评审 |
 | 5 | `aim_assist` 转正后是否保留原字段名 | 保留 `aim:` 命名并在 CHANGELOG 标记从「死配置」到「生效」 | 作者 |
 | 6 | profile 写入是否需要 git 集成（自动 commit / diff） | 不需要，仅本地 diff 视图 | 作者 |
 | 7 | 兼容性看板是否检测跨 profile 的 `signals` 自定义名冲突 | 需要，但放 P2 | 评审 |
 | 8 | 排期是否按 1 人全职假设 | 需 TL 确认 | TL |
+| 9 | MyGo 主界面路线（web vs native）的最终比例 | web 为主 + native 仅高频子窗，由 M0 spike 定 | 作者 |
+| 10 | Linux 发行下限与分发包形式（AppImage / Flatpak / deb） | AppImage 优先，明确 GTK3（+WebKitGTK 4.1）最低版本 | 作者 |
 
 ## 九、里程碑排期（建议）
 
 | 里程碑 | 内容 | 后端前置 | 预估 | 目标日期 |
 |---|---|---|---|---|
-| M0 | 冻结 STATE1 / CMD1 契约；`cmd/ds5gui` 骨架 + embed 前端；单一 HID owner 改造设计；技术选型定案 | 契约文档 | 3d | 2026-10-31 |
-| M1 | 设备面板 + 输入可视化 + 信号总线 + 日志 | `Set.Telemetry()`、ds5d 侧 shaped 广播、health | 10d | 2026-11-14 |
-| M2 | 扳机曲线编辑器 + 输出波形 + dry-run + 写入 profile | CMD1（preview / apply）、bench / watch 改走 CMD1 | 12d | 2026-12-01 |
-| M3 | 规则 Inspector + 时序 + 抢占链路 | STATE1 规则段、`Engine` telemetry sink | 10d | 2026-12-15 |
-| M4 | Profile 表单编辑器 + 严格校验 + 热重载 diff + JSON | `KnownFields`、`Set.SetShapers` / `Engine.Reload`、CMD1 reload | 9d | 2026-12-29 |
-| M5 | 校准器 / 音频 AI / vpad / radio / bridge / 兼容性看板 | CMD1 子项目只读接口、各进程 health | 12d | 2027-01-19 |
-| M6 | 摇杆体感增强（曲线 / 滤波 / 陀螺 / 反后坐力 / 双路一致性） | `internal/aim`、`ds5vpad` 注入链改造、profile 版本戳 | 14d | 2027-02-09 |
+| M0 | ~~冻结 STATE1 / CMD1 契约~~（已完成，见 `backend-capabilities.md`）；`cmd/ds5gui` 骨架（MyGo 壳）；**2d MyGo 三端 spike**（§七 M0） | 契约已冻结 | 5d | 2026-11-04 |
+| M1 | 设备面板 + 输入可视化 + 信号总线 + 日志 | ✅ 已就绪（`Set.Telemetry` / `health`） | 10d | 2026-11-18 |
+| M2 | 扳机曲线编辑器 + 输出波形 + dry-run + 写入 profile | CMD1（preview / apply）、bench / watch 改走 CMD1 | 12d | 2026-12-05 |
+| M3 | 规则 Inspector + 时序 + 抢占链路 | STATE1 规则段、`Engine` telemetry sink | 10d | 2026-12-19 |
+| M4 | Profile 表单编辑器 + 严格校验 + 热重载 diff + JSON | `KnownFields`、`Set.SetShapers` / `Engine.Reload`、CMD1 reload | 9d | 2027-01-02 |
+| M5 | 校准器 / 音频 AI / vpad / radio / bridge / 兼容性看板 | CMD1 子项目只读接口、各进程 health | 12d | 2027-01-23 |
+| M6 | 摇杆体感增强（曲线 / 滤波 / 陀螺 / 反后坐力 / 双路一致性） | `internal/aim`、`ds5vpad` 注入链改造、profile 版本戳 | 14d | 2027-02-13 |
 
-> 排期假设 1 人全职。M1 与 M3 的 STATE1 需求可合并为「一次把状态流做够」：合并后 M1 +3d、M3 −3d。M6 与 M2 有交互（曲线编辑器与摇杆曲线是两套不同画布），可并行推进但需同一套实时数据源。
+> 排期假设 1 人全职。后端契约已交付，M0 只剩壳骨架 + 2d spike（其后里程碑相对前版顺延 4 天）。M1 与 M3 的 STATE1 需求可合并为「一次把状态流做够」：合并后 M1 +3d、M3 −3d。M6 与 M2 有交互（曲线编辑器与摇杆曲线是两套不同画布），可并行推进但需同一套实时数据源。
 
 ## 十一、UI 设计与线框图
 
@@ -761,7 +782,7 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 | `aim_assist` 死配置范围 15–54 行，且无 `shape:` 块 | `profiles/fps-aim.yaml` | `grep -n '^[a-z_]*:' profiles/fps-aim.yaml` |
 | 热重载无通路 | `cmd/ds5d/main.go:75-90` | `grep -n 'sig.NewSet(shapers)\|rules.New(p, set' cmd/ds5d/main.go` |
 | HID 抢占 | `cmd/ds5d/main.go` `openDevice`、`cmd/ds5ctl/main.go` `openDevice`、`internal/source/trigger` 的 `dev.Read` | `grep -n 'func openDevice' cmd/ds5d/main.go cmd/ds5ctl/main.go` |
-| 控制面缺失（只写不读） | `internal/vpad/ipc/ipc.go` `acceptLoop` | `grep -n 'func (s \*Server) acceptLoop' internal/vpad/ipc/ipc.go` |
+| 控制面（已实现，`feat/ui-backend`） | `internal/vpad/ipc/cmd.go` + `cmd/ds5d/main.go` `SetCommandHandler` | `grep -n 'case "' cmd/ds5d/main.go` |
 | 端口与 magic 常量 | `ipc.go` `Magic` / `MagicSig` / `DefaultEndpoint` / `DefaultSignalEndpoint`；`cmd/ds5radio/main.go:28`；`cmd/ds5bridge/main.go:62` | `grep -n 'DefaultEndpoint\|DefaultSignalEndpoint\|Magic uint32' internal/vpad/ipc/ipc.go` |
 | `ds5ctl` 子命令全集 8 个、无 `-json` | `cmd/ds5ctl/main.go` 分发 | `grep -n 'case "' cmd/ds5ctl/main.go` |
 | 构建目标（`hidprobe` 不在 `make build` 内） | `Makefile` `build` / `build-onnx` / `bridge` / `windows` | `sed -n '10,35p' Makefile` |
