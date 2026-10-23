@@ -235,6 +235,7 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 频率       30–60Hz（SIG1 保持 125Hz 原始流不变）
 ```
 
+- `state=3 STALE` 自 `f0c86a0` 起由引擎真实写入：`when` 为假，且该规则 `when`/`value`/`params` 引用的信号中**任一** stale/absent；只有引用信号全部 fresh 但条件不满足时才写 `0 FALSE`。粒度是整条表达式，逐节点 AST 三态仍属 GUI Inspector 的后续增强。
 - 发送走既有 `broadcastRaw` 的「队列满即丢」语义，**绝不阻塞 125Hz 热路径**；丢帧计数进 health。
 - `version` 字段必备，沿用 `ver != 1 拒绝` 的既有风格，为后续 TLV 扩展留位。
 
@@ -264,10 +265,10 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 
 | 缺口 | 对应 GUI | 建议 |
 |---|---|---|
-| 规则引擎零遥测 | 3.1 / 3.2 / 3.3 | `Engine` 增加 `SetTelemetrySink(func(TickReport))`，在 `Step` 内填充，零分配优先 |
+| 规则引擎零遥测 | 3.1 / 3.2 / 3.3 | ✅ 已补齐：STATE1 规则段提供 `rule_id` / `state` / `priority` / `last_fire_ms` / `until_ms`；`STALE`（state=3）自 `f0c86a0` 起真实写入。逐节点 AST 求值仍为后续增强 |
 | 无 JSON 输出 | 4.5 | `ds5ctl profiles/check` 与 health 增加 `-json` |
 | 无 health | 1.1 | 走 CMD1 `health`，不用 HTTP |
-| profile 无 KnownFields | 4.2 | `yaml.NewDecoder(f).KnownFields(true)`；限定顶层与 rule 键；提供 `-strict-profile` 过渡开关 |
+| profile 无 KnownFields | 4.2 | ✅ 已补齐：默认严格解码（`a67dde7`），覆盖顶层 / rule / 嵌套键；`-strict-profile=false` 仅作迁移逃生；`source` 参数保留开放 map |
 | `ds5ctl` 无控制子命令 | 2.1 / 2.2 | `bench` / `watch` 改走 CMD1，行为向后兼容（flag 不变） |
 | dry-run 只有文本帧 | 2.2 | `-dry-run` 同时输出结构化帧（或直接产出 STATE1） |
 
@@ -355,6 +356,7 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 ### M3
 
 - [ ] 每条规则三态与实际决策一一对应；构造 3 条同 target 不同 priority 的样例，GUI 正确标出最终生效者与被覆盖者。
+- [ ] `STALE` 与 `FALSE` 必须可区分且与后端一致：引用信号 stale/absent 时 GUI 显示 `STALE` 且对应 `state=3`；引用信号 fresh、仅条件不满足时显示 `FALSE` 且对应 `state=2`。
 - [ ] `hold` 余量、`cooldown` 倒计时、release 衰减（250ms）曲线与 `engine_test.go` 已知用例逐帧吻合。
 - [ ] 表达式错误在 GUI 内 1 秒内可见并可跳转定位，不再需要看终端。
 

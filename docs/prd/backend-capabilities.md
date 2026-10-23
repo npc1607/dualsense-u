@@ -29,6 +29,9 @@ git merge-base --is-ancestor cda3c2f HEAD && echo "subscription isolation OK"
 | 严格 `profile.apply`（局部合并 + 逐键 applied/ignored） | `feat/ui-backend` / `82cf0af` | `signal.Shaper` 已补 json tag；非法 JSON 返回 `ok:false`；未知信号与越界值进 `ignored` |
 | `profile.apply` 拒绝无被识别字段的条目 + 活跃 profile 并发读写加锁 | `feat/ui-backend` / `da2ef4b` | 驼峰/拼错字段进 `ignored`（`no recognised fields`）；`profile.reload` 与 STATE1/sink/CMD1 的 `p` 访问改走 RWMutex |
 | `profile.reload` 原子化（先编译后换 shaping） | `feat/ui-backend` / `f13af79` | 校验或编译失败时 shaping / 规则 / 活跃 profile 三者均不变，不再出现「新 shaping + 旧规则」的半更新 |
+| `health.device` 设备身份 + sink 计数 | `feat/ui-backend` / `7c18f83` | 在 health 中**追加** `device` 对象（connected/path/transport/vid/pid/reconnects/write_errors）；dry-run/未连接返回 `connected:false`；计数为原子累计值 |
+| 规则 `STALE` 状态真正写入（`state=3`） | `feat/ui-backend` / `f0c86a0` | `when` 为假且其引用信号含 stale/absent 时推导为 3；全部引用信号 fresh 才是 2（FALSE） |
+| profile 严格解码 + `-strict-profile` | `feat/ui-backend` / `a67dde7` | 默认 `KnownFields(true)`，未知顶层/rule 键加载失败；`-strict-profile=false` 为迁移逃生开关 |
 
 > 结论：GUI 的构建与连接检查必须固定到 `feat/ui-backend` 分支（或包含上述提交的 tag），不要以 `main` 作为兼容基线。
 
@@ -119,7 +122,7 @@ fresh := ageMS != absent && ageMS <= ttlMS
 | 偏移 (Offset) | 类型 (Type) | 字段名 (Field) | 说明 (Description) |
 |---|---|---|---|
 | 0..1 | uint16 | RuleID | **稳定 id**：`uint16(md5(rule.name) 前 2 字节, Little-Endian)`，跨 `profile.reload` 不变（见 2.4.1） |
-| 2 | uint8 | State | 决策状态（数值 0..5，当前实际只会出现 0/1/2/4/5）：<br>`0`: FALSE (未命中)<br>`1`: TRUE (命中执行中)<br>`2`: HOLD (延迟保持中)<br>`3`: STALE (保留值，当前引擎不会写入)<br>`4`: COOLDOWN (冷却静默中)<br>`5`: ERROR (表达式求值异常) |
+| 2 | uint8 | State | 决策状态（数值 0..5，六态均可能出现在 STATE1）：<br>`0`: FALSE (未命中)<br>`1`: TRUE (命中执行中)<br>`2`: HOLD (延迟保持中)<br>`3`: STALE (引用了过期/缺失信号)<br>`4`: COOLDOWN (冷却静默中)<br>`5`: ERROR (表达式求值异常) |
 | 3..4 | int16 | Priority | 抢占优先级；条目顺序按 priority 升序 |
 | 5..8 | uint32 | LastFireMS | 距上一次触发的毫秒数；从未触发为 0 |
 | 9..12 | uint32 | UntilMS | 剩余 HOLD 保持时间（毫秒）；非 HOLD 状态为 0。它不是冷却倒计时 |
@@ -139,6 +142,17 @@ func StableRuleID(name string) uint16 {
 - 同一 Profile 内非空规则名必须唯一：`profile.Validate()` 在 `LoadFile` / `Builtin` / `Dir` / `profile.reload` 时强制校验。重复时返回
   `profile X: duplicate rule name "foo" (rules[3] and rules[7])` 并拒绝加载，因此不会再出现两条命名规则共享同一个 `rule_id` 的情况。
 - 匿名规则（`name` 为空）仍允许多条存在，其 label 回退为 `rules[i]`。历史 `far-far-west.yaml` 的重复名已在此前修复。
+
+#### 2.4.1.1 `state=3`（STALE）的推导规则
+
+`STALE` 不是「保留上一次的值」，而是「这次决策依据的信号不完整」。引擎在编译规则时收集 `when` / `value` / `params` 表达式引用到的信号名（标准词表 + profile `signals` 扩展，函数名不算信号）；每次 tick 的判定顺序为：
+
+1. `when` 为空或求值为真 → 沿用原有 TRUE / HOLD / COOLDOWN / ERROR 逻辑；
+2. `when` 求值为假且规则仍在 hold 窗口内 → HOLD（已生效的锁存优先）；
+3. `when` 求值为假，且引用信号中**任一**在本 tick 不 fresh（含从未上报、超过 `signal_ttl`）→ `3 STALE`；
+4. 否则（所有引用信号都 fresh，只是条件不满足）→ `0 FALSE`。
+
+粒度是**整条表达式**：不做逐节点 AST 求值，因此 `brake > 0.2 && has(speed)` 在 `speed` 缺失时整条规则报 STALE，即使 `brake` 分支可以单独判定。逐节点三态属于 GUI Inspector 的后续增强。
 
 ### 2.5 输出摘要段定义 (Summary, 40 Bytes)
 反映手柄当前真实的物理输出报告状态：
@@ -208,10 +222,23 @@ func StableRuleID(name string) uint16 {
     "rate_hz": 125,
     "profile": "fps-aim",
     "source": "trigger",
-    "jitter_us": 14
+    "jitter_us": 14,
+    "device": {
+      "connected": true,
+      "path": "/dev/hidraw3",
+      "transport": "usb",
+      "vendor_id": "054c",
+      "product_id": "0ce6",
+      "reconnects": 0,
+      "write_errors": 0
+    }
   }
   ```
+- 旧字段（`uptime_s` / `subscribers` / `rate_hz` / `profile` / `source` / `jitter_us`）全部保留，`device` 为纯追加，老客户端可忽略。
 - `subscribers` 是全部 IPC 客户端数；`jitter_us` 是最近一次 tick 的绝对抖动。
+- `device.transport` 为 `"usb"` 或 `"bluetooth"`；`vendor_id` / `product_id` 为 4 位小写十六进制字符串（来自 `device.Info`）。
+- `device.write_errors` 是累计写失败次数（含关机释放帧失败），`device.reconnects` 是成功重新接管的次数；两者由 sink 的原子计数器提供，CMD1 读取不会与 sink goroutine 竞争。
+- `-dry-run` 或启动时未找到手柄：`device.connected` 为 `false`，`path` / `transport` / `vendor_id` / `product_id` 可缺省，`reconnects` / `write_errors` 仍返回 `0`，请求本身不报错。运行中拔线且重新接管失败时同样回到 `connected:false`（保留最后一次已知身份直到下次接管成功）。
 
 #### 2. `state.subscribe`
 把**当前连接**切换为 STATE1 状态流订阅，并协商服务端 STATE1 推送频率。
@@ -327,6 +354,19 @@ func StableRuleID(name string) uint16 {
 声明或交还硬件操作权（当前仅返回成功占位，不实际改变 HID 所有权）。
 - **请求参数**：无
 - **返回结果**：`{"claimed": true}`
+
+### 3.3 profile 严格校验（`-strict-profile`）
+
+`ds5d` / `ds5ctl` 的 profile 装载默认开启严格模式：`LoadFile`、内置 `builtin()`、目录 `Dir()` 与 `Resolve()` 全部走 `yaml.NewDecoder` + `KnownFields(true)`。未知键从「静默丢弃」变为加载失败，错误会指出键名与行号。
+
+- **覆盖范围**：profile 顶层键、`rules[]` 键、以及这些字段可达的嵌套结构（`shape` / `safety` / `haptics` / `aim` / `modulate` 等）。
+- **不覆盖**：`source` 的未知参数。`Source.Params` 是 `yaml:",inline"` 开放 map，未知 source 参数仍会进入 `Params`，由对应 source 适配器自行解释/校验；这是有意保留的设计，不是严格模式的漏网。
+- **逃生开关**：`ds5d -strict-profile=false`、`ds5ctl profiles -strict-profile=false`、`ds5ctl check -strict-profile=false` 会退回旧的 `yaml.Unmarshal` 行为并打印一条警告。它只用于迁移存量第三方 profile，不建议长期关闭。
+- **迁移步骤**：
+  1. 用 `ds5ctl check -profile <name>`（默认 strict）复现错误，按提示删除废弃键或补全真实功能字段；
+  2. 确认无误后删除 `-strict-profile=false`；
+  3. 若必须临时启动，可先用 `-strict-profile=false` 顶住，再按第 1 步修正。
+- 本仓库内置 profile 与 `profiles/*.yaml` 示例已在严格模式下全量通过；行为变更与迁移说明见 `dualsense-c` 的 `CHANGELOG.md`。
 
 ---
 
