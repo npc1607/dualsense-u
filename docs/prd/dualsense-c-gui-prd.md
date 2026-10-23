@@ -247,7 +247,7 @@ header     magic u32 | version u16 | flags u16(当前恒 0) | seq u32 | tick_ms 
 | `health` | uptime、subscribers、rate_hz、profile、source、jitter_us | ✅ 已实现 |
 | `state.subscribe{rate}` | 协商 STATE1 推送频率（30 / 60Hz） | ✅ 已实现 |
 | `signals.subscribe` | 切到 SIG1 125Hz 原始流（与 `state.subscribe` 互斥；无参数、不协商频率；连接建立 20ms 内未发 CMD1 的老客户端自动走此路） | ✅ 已实现 |
-| `profile.reload` | 从磁盘重读当前 profile 并热应用（`SetShapers` + `Engine.Reload`，失败回滚） | ✅ 已实现 |
+| `profile.reload` | 从磁盘重读当前 profile 并热应用（校验 → 编译规则 → 发布 shaping → 发布 profile，**全有或全无**；失败时 shaping/规则/活跃 profile 均不变） | ✅ 已实现（原子性 `f13af79`） |
 | `profile.apply{shape}` | **只支持 `shape` 补丁**（局部合并；未知信号与越界值进 `ignored`；非法 JSON 返回 `ok:false`） | ✅ 已实现：局部合并 + 逐键 `applied`/`ignored`，非法 JSON 报错 |
 | `effect.preview{target, mode, params, ttl_ms}` | 临时覆盖 L2/R2 效果，ttl 到期交还规则引擎 | ✅ 已实现 |
 | `rate.set{hz}` | 切换 sink 出帧率（非法值静默忽略） | ✅ 已实现 |

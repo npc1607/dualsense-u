@@ -28,6 +28,7 @@ git merge-base --is-ancestor cda3c2f HEAD && echo "subscription isolation OK"
 | 规则名唯一性校验（重复非空规则名加载失败） | `feat/ui-backend` / `a18d2aa` | `profile.Validate()` 拒绝同名非空规则，避免共享 `rule_id` 与 reload 计时槽 |
 | 严格 `profile.apply`（局部合并 + 逐键 applied/ignored） | `feat/ui-backend` / `82cf0af` | `signal.Shaper` 已补 json tag；非法 JSON 返回 `ok:false`；未知信号与越界值进 `ignored` |
 | `profile.apply` 拒绝无被识别字段的条目 + 活跃 profile 并发读写加锁 | `feat/ui-backend` / `da2ef4b` | 驼峰/拼错字段进 `ignored`（`no recognised fields`）；`profile.reload` 与 STATE1/sink/CMD1 的 `p` 访问改走 RWMutex |
+| `profile.reload` 原子化（先编译后换 shaping） | `feat/ui-backend` / `f13af79` | 校验或编译失败时 shaping / 规则 / 活跃 profile 三者均不变，不再出现「新 shaping + 旧规则」的半更新 |
 
 > 结论：GUI 的构建与连接检查必须固定到 `feat/ui-backend` 分支（或包含上述提交的 tag），不要以 `main` 作为兼容基线。
 
@@ -243,6 +244,10 @@ func StableRuleID(name string) uint16 {
 - **返回结果**：`{"reloaded": true}`
 - **失败**：`ok=false` + 编译/校验错误信息，旧 Profile 保持运行
 - **生效范围**：整形曲线（`set.SetShapers`）与规则（`engine.Reload`）；规则计时状态按**规则名**继承；`rule_id` 由名字派生，因此跨 reload 稳定
+- **原子性（`f13af79` 起）**：校验 → 编译全部规则 → 发布 shaping → 发布活跃 profile，三步全有或全无。校验失败或任一规则编译失败时，**整形曲线、规则集合、活跃 profile 指针三者都不变**，`STATE1` 里的 `rule_id`/`state`/`until_ms` 与失败前逐项相同。历史版本先换 shaping 再编译，失败会留下「新 shaping + 旧规则」的半更新状态。
+- **实施顺序原因**：`Engine.Reload` 自身即原子（先编译进临时引擎，最后持锁一次换掉 `e.p`/`e.rules`），因此只要把 shaping 的发布放到它之后，就无需回滚代码
+- **已生效信号的 shaped 值**：`Set` 中已计算好的 shaped 值不会被追溯重算，新曲线从下一帧源数据开始生效
+- **与 `profile.apply` 的关系**：`profile.apply` 的 shape 补丁只存在于运行时，`profile.reload` 会用 YAML 里的 `shape` 覆盖它（重载后补丁丢弃）
 
 #### 5. `profile.apply`
 动态局部打补丁，当前只支持 `shape`（信号整形曲线），用于 GUI 曲线编辑器拖拽时的免落盘实时试听。
