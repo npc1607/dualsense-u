@@ -23,7 +23,7 @@ status: draft
 > - 已有 IPC：`9997` 上 SIG1（`ver=1`，`magic u32 / ver u16 / count u16 / seq u32` 共 12B 头 + N×5B，条目按 id 升序，`ver!=1` 直接拒绝）与 SPK1（JSON 载荷）；`9998` 上 FFB1（12B）；`ds5radio` 独立占 UDP `9999`。
 > - `signal.Set.Snapshot()` 只返回 shaped 值且 **直接丢弃 stale**；而 SIG1 广播的是 source 原始帧 `f.Values`（`cmd/ds5d/main.go:178`），既无 shaped、无 freshness，也无规则状态。
 > - `rules.Engine` 每 tick 的决策过程（三态、params 求值、hold / cooldown、priority 抢占、release 衰减）全部是 `rule` 结构体的未导出字段，**无任何对外遥测**。
-> - Profile 通过 `yaml.Unmarshal` 装载，**未开 `KnownFields`**，未知键静默丢弃（`profiles/fps-aim.yaml` 第 15–54 行的整个 `aim_assist` 块当前即为死配置）；`Source.Params` 是 `yaml:",inline"` 开放 map，严格模式也覆盖不到。
+> - Profile 曾通过 `yaml.Unmarshal` 装载、未开 `KnownFields`，未知键静默丢弃（`profiles/fps-aim.yaml` 的 `aim_assist` 块一度是死配置）→ 已由 `a67dde7` 改为**默认严格解码**（`-strict-profile` 可临时关闭），`81d7d1a` 修掉了 `-profiles` 目录解码失败时静默回退 builtin 的问题；`Source.Params` 仍是 `yaml:",inline"` 开放 map，严格模式不覆盖 source 参数。
 > - 热重载无通路：`shapers` 只在 `cmd/ds5d/main.go:75-88` 构建一次并传入 `sig.NewSet(shapers)`，`Engine` 只在 `rules.New` 时吃一次 `*Profile`。
 > - `ds5ctl bench/watch/test` 会各自 open HID，与 `ds5d` 抢同一设备；`ds5d` 无热重载、无 rate 切换、无 health、无 JSON 输出。
 > - 结论：GUI 的第一阶段瓶颈不在前端，而在于后端**缺少一条带 freshness 与规则状态的状态流**和**一条控制通道**。

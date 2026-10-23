@@ -29,6 +29,7 @@ git merge-base --is-ancestor cda3c2f HEAD && echo "subscription isolation OK"
 | 严格 `profile.apply`（局部合并 + 逐键 applied/ignored） | `feat/ui-backend` / `82cf0af` | `signal.Shaper` 已补 json tag；非法 JSON 返回 `ok:false`；未知信号与越界值进 `ignored` |
 | `profile.apply` 拒绝无被识别字段的条目 + 活跃 profile 并发读写加锁 | `feat/ui-backend` / `da2ef4b` | 驼峰/拼错字段进 `ignored`（`no recognised fields`）；`profile.reload` 与 STATE1/sink/CMD1 的 `p` 访问改走 RWMutex |
 | `profile.reload` 原子化（先编译后换 shaping） | `feat/ui-backend` / `f13af79` | 校验或编译失败时 shaping / 规则 / 活跃 profile 三者均不变，不再出现「新 shaping + 旧规则」的半更新 |
+| `-profiles` 目录里的严格解码错误不再静默回退 builtin | `feat/ui-backend` / `81d7d1a` | 只有文件不存在才回退；未知键会真正报错，`ds5ctl check` 不会误报 ok |
 | `health.device` 设备身份 + sink 计数 | `feat/ui-backend` / `7c18f83` | 在 health 中**追加** `device` 对象（connected/path/transport/vid/pid/reconnects/write_errors）；dry-run/未连接返回 `connected:false`；计数为原子累计值 |
 | 规则 `STALE` 状态真正写入（`state=3`） | `feat/ui-backend` / `f0c86a0` | `when` 为假且其引用信号含 stale/absent 时推导为 3；全部引用信号 fresh 才是 2（FALSE） |
 | profile 严格解码 + `-strict-profile` | `feat/ui-backend` / `a67dde7` | 默认 `KnownFields(true)`，未知顶层/rule 键加载失败；`-strict-profile=false` 为迁移逃生开关 |
@@ -238,7 +239,8 @@ func StableRuleID(name string) uint16 {
 - `subscribers` 是全部 IPC 客户端数；`jitter_us` 是最近一次 tick 的绝对抖动。
 - `device.transport` 为 `"usb"` 或 `"bluetooth"`；`vendor_id` / `product_id` 为 4 位小写十六进制字符串（来自 `device.Info`）。
 - `device.write_errors` 是累计写失败次数（含关机释放帧失败），`device.reconnects` 是成功重新接管的次数；两者由 sink 的原子计数器提供，CMD1 读取不会与 sink goroutine 竞争。
-- `-dry-run` 或启动时未找到手柄：`device.connected` 为 `false`，`path` / `transport` / `vendor_id` / `product_id` 可缺省，`reconnects` / `write_errors` 仍返回 `0`，请求本身不报错。运行中拔线且重新接管失败时同样回到 `connected:false`（保留最后一次已知身份直到下次接管成功）。
+- `-dry-run` 或启动时未找到手柄：`device.connected` 为 `false`，`path` / `transport` / `vendor_id` / `product_id` 可缺省，`reconnects` / `write_errors` 仍返回 `0`，请求本身不报错。运行中拔线且重新接管失败时同样回到 `connected:false`，此时 **身份字段（`path` / `transport` / `vendor_id` / `product_id`）一并缺省**（内部仍保留最后身份用于日志与下次比对），`reconnects` / `write_errors` 为累计值、不清零。
+- `vendor_id` / `product_id` 只在确实探测到时才给；强制 `-hidraw` 或读取描述符失败等拿不到身份的情形，字段缺省而**不会**编造 `"0000"`。
 
 #### 2. `state.subscribe`
 把**当前连接**切换为 STATE1 状态流订阅，并协商服务端 STATE1 推送频率。
