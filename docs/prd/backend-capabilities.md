@@ -27,6 +27,7 @@ git merge-base --is-ancestor cda3c2f HEAD && echo "subscription isolation OK"
 | 稳定 `rule_id`（`md5(rule.name)` 前 2 字节） | `feat/ui-backend` / `190426a` | 更早的提交用切片下标，`profile.reload` 后 id 会跳到别的规则上 |
 | 规则名唯一性校验（重复非空规则名加载失败） | `feat/ui-backend` / `a18d2aa` | `profile.Validate()` 拒绝同名非空规则，避免共享 `rule_id` 与 reload 计时槽 |
 | 严格 `profile.apply`（局部合并 + 逐键 applied/ignored） | `feat/ui-backend` / `82cf0af` | `signal.Shaper` 已补 json tag；非法 JSON 返回 `ok:false`；未知信号与越界值进 `ignored` |
+| `profile.apply` 拒绝无被识别字段的条目 + 活跃 profile 并发读写加锁 | `feat/ui-backend` / `da2ef4b` | 驼峰/拼错字段进 `ignored`（`no recognised fields`）；`profile.reload` 与 STATE1/sink/CMD1 的 `p` 访问改走 RWMutex |
 
 > 结论：GUI 的构建与连接检查必须固定到 `feat/ui-backend` 分支（或包含上述提交的 tag），不要以 `main` 作为兼容基线。
 
@@ -257,7 +258,7 @@ func StableRuleID(name string) uint16 {
 - **返回结果**：
   ```json
   {
-    "applied": ["throttle", "l2"],
+    "applied": ["l2", "throttle"],
     "ignored": ["nope", "r2"],
     "reasons": {
       "nope": "unknown signal",
@@ -274,6 +275,7 @@ func StableRuleID(name string) uint16 {
 - **校验与回报**：
   - 非法 JSON、空 body、缺少 `shape` 或 `shape` 为空 -> `ok:false` + error，不应用任何补丁。
   - 未知信号（不在 `signal.Standard` 且不在 profile 的 `signals` 扩展中）-> 进入 `ignored`，原因为 `unknown signal`。
+  - 信号名合法但**没有任何被识别的字段**（驼峰 `SlewUp`、拼错成 `slewup`、或空对象）-> 进入 `ignored`，原因为 `no recognised fields`，不会假装应用成功。
   - 数值越界 -> 对应信号进入 `ignored` 并附原因：`deadzone` 必须在 `[0,1]`，`gamma` 必须 `> 0`，`slew_up` / `slew_down` 必须 `>= 0`；单个信号内多个字段越界时只回报第一个原因（固定顺序 `deadzone → gamma → slew_up → slew_down`）。
   - 一个请求中合法与非法信号混合时，合法信号照常 `applied`，非法信号逐条 `ignored`。
   - `applied` / `ignored` 均排序，`reasons` 只包含被忽略的信号。
